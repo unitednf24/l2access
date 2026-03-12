@@ -34,3 +34,10 @@ priority = "optional"
 assets = [
     { source = "target/release/l2access", dest = "/usr/bin/l2access", mode = "755" }
 ]
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "z"
+panic = "abort"
+codegen-units = 1

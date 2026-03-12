@@ -9,72 +9,66 @@ on:
 
 jobs:
   build_openwrt:
-    name: Build OpenWrt Package
+    name: Build OpenWrt IPK
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: armsr
-            subtarget: armv8
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          path: l2access
 
-      - name: Install dependencies
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build binary with cross
+        run: cross build --release --profile release --target aarch64-unknown-linux-musl
+        
+      - name: Collect dependencies and prepare IPK
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libncurses5-dev gawk git subversion libssl-dev gettext \
-            zlib1g-dev swig unzip time python3-setuptools file wget rsync curl qemu-utils zstd
+          # Create packaging directory structure
+          mkdir -p ipk_build/data/usr/bin
+          mkdir -p ipk_build/data/etc/config
+          mkdir -p ipk_build/data/etc/init.d
+          mkdir -p ipk_build/control
 
-      - name: Download OpenWrt SDK
-        env:
-          TARGET: ${{ matrix.target }}
-          SUBTARGET: ${{ matrix.subtarget }}
-          OPENWRT_VER: "24.10.5"
-        run: |
-          BASE_URL="https://downloads.openwrt.org/releases/${OPENWRT_VER}/targets/${TARGET}/${SUBTARGET}"
+          # Copy binaries and scripts
+          cp target/aarch64-unknown-linux-musl/release/l2access ipk_build/data/usr/bin/
+          cp openwrt/files/l2access.config ipk_build/data/etc/config/l2access
+          cp openwrt/files/l2access.init ipk_build/data/etc/init.d/l2access
           
-          # Fetch the sha256sums file to dynamically determine the exact SDK filename
-          curl -sL "${BASE_URL}/sha256sums" -o sha256sums
-          
-          SDK_FILE=$(grep 'openwrt-sdk' sha256sums | grep -E 'tar\.(xz|zst)' | awk '{print $2}' | sed 's/^[* ]*//')
-          
-          echo "Discovered SDK package: $SDK_FILE"
-          
-          wget "${BASE_URL}/${SDK_FILE}"
-          tar -xf "${SDK_FILE}"
-          
-          # Remove the archive so the wildcard only matches the extracted directory
-          rm -f "${SDK_FILE}"
-          
-          # Rename extracted folder to exactly 'sdk/'
-          mv openwrt-sdk-* sdk
+          # Set proper execute permissions exactly as OpenWrt expects
+          chmod 755 ipk_build/data/usr/bin/l2access
+          chmod 755 ipk_build/data/etc/init.d/l2access
+          chmod 644 ipk_build/data/etc/config/l2access
 
-      - name: Setup OpenWrt feeds and dependencies
-        run: |
-          cd sdk
-          ./scripts/feeds update -a
-          ./scripts/feeds install rust
-          make defconfig
+          # Calculate total installed size for the IPK manifest
+          SIZE=$(du -bs ipk_build/data/usr/bin/l2access | cut -f1)
 
-      - name: Link project to SDK packages
-        run: |
-          ln -s $GITHUB_WORKSPACE/l2access/openwrt $GITHUB_WORKSPACE/sdk/package/l2access
+          # Generate the control file mimicking rust-package.mk output
+          cat <<EOF > ipk_build/control/control
+Package: l2access
+Version: 0.1.0-1
+Depends: libc, libip4tc, libip6tc, ip-full
+License: MIT
+Section: net
+Architecture: aarch64_generic
+Installed-Size: $SIZE
+Description: Secure, zero-configuration L2-tunnelled IP connectivity over local networks.
+EOF
 
-      - name: Build l2access Package
-        run: |
-          cd sdk
-          # Unset the CI variable entirely so the OpenWrt Rust host-builder 
-          # doesn't panic downloading ci-llvm metadata in the background
-          unset CI
-          make package/l2access/compile V=sc PKG_SOURCE_URL="file://$GITHUB_WORKSPACE/l2access"
+          cd ipk_build
+          # IMPORTANT: opkg expects debian-binary to say "2.0"
+          echo "2.0" > debian-binary
 
+          # Archive the file trees (must be standard tar.gz exactly as opkg unpacks them)
+          tar --owner=root --group=root -C data -czvf data.tar.gz .
+          tar --owner=root --group=root -C control -czvf control.tar.gz .
+
+          # Construct the final .ipk (must preserve order: debian-binary, control, data)
+          tar --owner=root --group=root -czvf l2access_0.1.0-1_aarch64_generic.ipk ./debian-binary ./control.tar.gz ./data.tar.gz
+          echo "IPK package generated successfully."
+          
       - name: Upload IPK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: l2access-openwrt-${{ matrix.target }}-${{ matrix.subtarget }}
-          path: sdk/bin/packages/*/base/l2access_*.ipk
+          name: l2access-openwrt-aarch64
+          path: ipk_build/l2access_0.1.0-1_aarch64_generic.ipk
