@@ -102,39 +102,20 @@ fn main() -> Result<()> {
 
     let subnet = Subnet::parse(&subnet_str)?;
 
-    let mut bind_ifaces = Vec::new();
-    if let Some(ifaces_raw) = iface_str {
-        bind_ifaces.extend(ifaces_raw.split(',').map(|s| s.trim().to_string()));
-    } else {
-        // Collect all active, non-loopback interfaces dynamically
-        let all = pnet::datalink::interfaces();
-        for i in all {
-            if i.is_up() && !i.is_loopback() && !exclude_list.contains(&i.name) {
-                bind_ifaces.push(i.name.clone());
-            }
-        }
-    }
-
-    if bind_ifaces.is_empty() {
-        eprintln!("No valid network interfaces found to bind.");
-        std::process::exit(1);
-    }
-
-    println!("Binding to interfaces: {:?}", bind_ifaces);
+    let explicit_ifaces = iface_str.map(|s| {
+        s.split(',')
+            .map(|x| x.trim().to_string())
+            .collect::<Vec<_>>()
+    });
 
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_clone = std::sync::Arc::clone(&stop);
     let _ = ctrlc::set_handler(move || {
-        // If the user mashes Ctrl+C repeatedly, exit instantaneously.
         if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
             std::process::exit(1);
         }
-
         println!("\nInitiating graceful shutdown across all interfaces... (Ctrl+C again to force)");
         stop_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-
-        // On some architectures, AF_PACKET natively ignores SO_RCVTIMEO and deadlocks.
-        // We spin off a background thread to forcefully kill the application if threads fail to yield organically.
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(1500));
             std::process::exit(0);
@@ -142,23 +123,29 @@ fn main() -> Result<()> {
     });
 
     if is_server {
-        let mut handles = Vec::new();
-        for iface in bind_ifaces {
-            let subnet_clone = subnet.clone();
-            let stop_thread = std::sync::Arc::clone(&stop);
-            handles.push(std::thread::spawn(move || {
-                if let Err(e) = server::run(&iface, subnet_clone, stop_thread) {
-                    eprintln!("[{}] Server error: {}", iface, e);
-                }
-            }));
-        }
-
-        // Wait for all interfaces to exit securely
-        for h in handles {
-            let _ = h.join();
+        if let Err(e) = server::run(explicit_ifaces, exclude_list, subnet, stop) {
+            eprintln!("Server error: {}", e);
         }
     } else {
-        // Client uses a single UI loop internally handling all its requested interfaces seamlessly natively
+        let mut bind_ifaces = Vec::new();
+        if let Some(explicit) = explicit_ifaces {
+            bind_ifaces = explicit;
+        } else {
+            let all = pnet::datalink::interfaces();
+            for i in all {
+                if i.is_up() && !i.is_loopback() && !exclude_list.contains(&i.name) {
+                    bind_ifaces.push(i.name.clone());
+                }
+            }
+        }
+
+        if bind_ifaces.is_empty() {
+            eprintln!("No valid network interfaces found to bind.");
+            std::process::exit(1);
+        }
+
+        println!("Binding to interfaces: {:?}", bind_ifaces);
+
         if let Err(e) = client::run(bind_ifaces, subnet, stop) {
             eprintln!("Client error: {}", e);
         }

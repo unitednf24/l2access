@@ -167,7 +167,9 @@ pub fn run(
 // ── TUI discovery + selection ─────────────────────────────────────────────────
 
 fn discover_and_select(iface_names: &[String]) -> Result<(ServerInfo, String)> {
-    let servers = Arc::new(Mutex::new(Vec::<(ServerInfo, String)>::new()));
+    let servers = Arc::new(Mutex::new(
+        Vec::<(ServerInfo, String, std::time::Instant)>::new(),
+    ));
     let stop_bg = Arc::new(AtomicBool::new(false));
 
     // Background thread: owns disc_rx exclusively — no mutex on the receiver.
@@ -203,12 +205,13 @@ fn discover_and_select(iface_names: &[String]) -> Result<(ServerInfo, String)> {
                     if let Some(L2APacket::Discovery(d)) = parse_l2a_payload(payload) {
                         let mut list = servers_bg.lock().unwrap();
                         let mut found = false;
-                        for (s, iname) in list.iter_mut() {
+                        for (s, iname, last_seen) in list.iter_mut() {
                             if s.mac == src_mac && iname == &iface_clone {
                                 s.hostname = d.hostname.clone();
                                 s.version = d.version.clone();
                                 s.pubkey = d.server_pubkey;
                                 s.subnet_cidr = d.subnet_cidr.clone();
+                                *last_seen = std::time::Instant::now();
                                 found = true;
                                 break;
                             }
@@ -223,6 +226,7 @@ fn discover_and_select(iface_names: &[String]) -> Result<(ServerInfo, String)> {
                                     subnet_cidr: d.subnet_cidr,
                                 },
                                 iface_clone.clone(),
+                                std::time::Instant::now(),
                             ));
                         }
                     }
@@ -248,10 +252,24 @@ fn discover_and_select(iface_names: &[String]) -> Result<(ServerInfo, String)> {
 
 fn tui_loop(
     stdout: &mut Stdout,
-    servers: &Arc<Mutex<Vec<(ServerInfo, String)>>>,
+    servers: &Arc<Mutex<Vec<(ServerInfo, String, std::time::Instant)>>>,
     selected: &mut usize,
 ) -> Result<(ServerInfo, String)> {
     loop {
+        {
+            let mut list = servers.lock().unwrap();
+            let now = std::time::Instant::now();
+            let len_before = list.len();
+            list.retain(|(_, _, last_seen)| {
+                now.duration_since(*last_seen) < Duration::from_secs(16)
+            });
+            if list.len() < len_before {
+                if *selected >= list.len() {
+                    *selected = list.len().saturating_sub(1);
+                }
+            }
+        }
+
         render(stdout, servers, *selected)?;
 
         // poll with a short timeout so the list refreshes even with no input
@@ -282,7 +300,8 @@ fn tui_loop(
             }) => {
                 let list = servers.lock().unwrap();
                 if *selected < list.len() {
-                    return Ok(list[*selected].clone());
+                    let (ref s, ref i, _) = list[*selected];
+                    return Ok((s.clone(), i.clone()));
                 }
             }
             Event::Key(KeyEvent {
@@ -308,7 +327,7 @@ fn tui_loop(
 
 fn render(
     stdout: &mut Stdout,
-    servers: &Arc<Mutex<Vec<(ServerInfo, String)>>>,
+    servers: &Arc<Mutex<Vec<(ServerInfo, String, std::time::Instant)>>>,
     selected: usize,
 ) -> Result<()> {
     let list = servers.lock().unwrap().clone();
@@ -344,7 +363,7 @@ fn render(
             ResetColor,
         )?;
 
-        for (i, (s, iname)) in list.iter().enumerate() {
+        for (i, (s, iname, _)) in list.iter().enumerate() {
             let color = if i == selected {
                 Color::Black
             } else {

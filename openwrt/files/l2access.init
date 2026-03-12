@@ -18,6 +18,15 @@ start_service() {
 		config_get subnet main subnet "169.254.0.0/16"
 
 
+		# Register network interface automatically if missing
+		if ! uci -q get network.l2access > /dev/null; then
+			uci set network.l2access=interface
+			uci set network.l2access.proto='none'
+			uci set network.l2access.device='l2access'
+			uci set network.l2access.auto='0'
+			uci commit network
+			/etc/init.d/network reload
+		fi
 
 		# Register firewall zone automatically if missing
 		if ! uci -q get firewall.@zone[-1].name | grep -q 'l2access'; then
@@ -32,12 +41,11 @@ start_service() {
 				uci set firewall.@zone[-1].input='ACCEPT'
 				uci set firewall.@zone[-1].output='ACCEPT'
 				uci set firewall.@zone[-1].forward='REJECT'
-				uci add_list firewall.@zone[-1].device='l2access+'
+				uci add_list firewall.@zone[-1].network='l2access'
 				uci commit firewall
 				/etc/init.d/firewall reload
 			fi
 		fi
-
 		# Reload l2access config (overwritten by firewall check)
 		config_load l2access
 
