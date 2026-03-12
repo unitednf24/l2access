@@ -1,0 +1,78 @@
+name: OpenWrt Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build_openwrt:
+    name: Build OpenWrt Package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86
+            subtarget: 64
+          - target: armsr
+            subtarget: armv8
+          - target: ath79
+            subtarget: generic
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          path: l2access
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev gawk git subversion libssl-dev gettext \
+            zlib1g-dev swig unzip time python3-distutils file wget rsync curl qemu-utils
+
+      - name: Download OpenWrt SDK
+        env:
+          TARGET: ${{ matrix.target }}
+          SUBTARGET: ${{ matrix.subtarget }}
+          OPENWRT_VER: "24.10.5"
+        run: |
+          BASE_URL="https://downloads.openwrt.org/releases/${OPENWRT_VER}/targets/${TARGET}/${SUBTARGET}"
+          
+          # Fetch the sha256sums file to dynamically determine the exact SDK filename
+          curl -sL "${BASE_URL}/sha256sums" -o sha256sums
+          
+          SDK_FILE=$(grep 'openwrt-sdk' sha256sums | grep 'tar.xz' | awk '{print $2}' | strings | sed 's/^*//')
+          
+          echo "Discovered SDK package: $SDK_FILE"
+          
+          wget "${BASE_URL}/${SDK_FILE}"
+          tar -xf "${SDK_FILE}"
+          
+          # Rename extracted folder to exactly 'sdk/'
+          mv openwrt-sdk* sdk
+
+      - name: Setup OpenWrt feeds and dependencies
+        run: |
+          cd sdk
+          ./scripts/feeds update -a
+          ./scripts/feeds install rust
+          make defconfig
+
+      - name: Link project to SDK packages
+        run: |
+          ln -s $GITHUB_WORKSPACE/l2access/openwrt $GITHUB_WORKSPACE/sdk/package/l2access
+
+      - name: Build l2access Package
+        run: |
+          cd sdk
+          make package/l2access/compile V=sc PKG_SOURCE_URL="file://$GITHUB_WORKSPACE/l2access"
+
+      - name: Upload IPK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: l2access-openwrt-${{ matrix.target }}-${{ matrix.subtarget }}
+          path: sdk/bin/packages/*/base/l2access_*.ipk

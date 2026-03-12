@@ -1,0 +1,36 @@
+[package]
+name = "l2access"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "l2access"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+pnet = "0.34"
+tun = "0.6"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+crossterm = "0.27"
+anyhow = "1"
+ctrlc = "3"
+libc = "0.2"
+
+[package.metadata.deb]
+maintainer = "unitednf <unitednf@example.com>"
+copyright = "2026"
+license-file = []
+extended-description = "Secure L2-tunnelled IP connectivity"
+depends = "$auto"
+section = "net"
+priority = "optional"
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/l2access", dest = "/usr/bin/l2access", mode = "755" }
+]
