@@ -32,7 +32,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libncurses5-dev gawk git subversion libssl-dev gettext \
-            zlib1g-dev swig unzip time python3-setuptools file wget rsync curl qemu-utils
+            zlib1g-dev swig unzip time python3-setuptools file wget rsync curl qemu-utils zstd
 
       - name: Download OpenWrt SDK
         env:
@@ -45,7 +45,7 @@ jobs:
           # Fetch the sha256sums file to dynamically determine the exact SDK filename
           curl -sL "${BASE_URL}/sha256sums" -o sha256sums
           
-          SDK_FILE=$(grep 'openwrt-sdk' sha256sums | grep 'tar.xz' | awk '{print $2}' | strings | sed 's/^*//')
+          SDK_FILE=$(grep 'openwrt-sdk' sha256sums | grep -E 'tar\.(xz|zst)' | awk '{print $2}' | sed 's/^[* ]*//')
           
           echo "Discovered SDK package: $SDK_FILE"
           
