@@ -22,6 +22,8 @@ pub enum PacketType {
     AuthFail = 0x04,
     Tunnel = 0x05,
     Disconnect = 0x06,
+    KeepaliveReq = 0x07,
+    KeepaliveRep = 0x08,
 }
 
 impl PacketType {
@@ -33,6 +35,8 @@ impl PacketType {
             0x04 => Some(Self::AuthFail),
             0x05 => Some(Self::Tunnel),
             0x06 => Some(Self::Disconnect),
+            0x07 => Some(Self::KeepaliveReq),
+            0x08 => Some(Self::KeepaliveRep),
             _ => None,
         }
     }
@@ -71,6 +75,8 @@ pub enum L2APacket {
     AuthFail(u8),
     Tunnel(TunnelData),
     Disconnect,
+    KeepaliveReq,
+    KeepaliveRep,
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
@@ -100,6 +106,8 @@ pub fn parse_l2a_payload(data: &[u8]) -> Option<L2APacket> {
         }
         PacketType::Tunnel => parse_tunnel(rest),
         PacketType::Disconnect => Some(L2APacket::Disconnect),
+        PacketType::KeepaliveReq => Some(L2APacket::KeepaliveReq),
+        PacketType::KeepaliveRep => Some(L2APacket::KeepaliveRep),
     }
 }
 
@@ -240,6 +248,14 @@ pub fn build_tunnel(nonce: &[u8; 12], ciphertext: &[u8]) -> Vec<u8> {
 
 pub fn build_disconnect() -> Vec<u8> {
     header(PacketType::Disconnect)
+}
+
+pub fn build_keepalive_req() -> Vec<u8> {
+    header(PacketType::KeepaliveReq)
+}
+
+pub fn build_keepalive_rep() -> Vec<u8> {
+    header(PacketType::KeepaliveRep)
 }
 
 // ── Ethernet frame helpers ───────────────────────────────────────────────────

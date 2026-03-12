@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::io;
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tun::Device as _; // brings .name() into scope
 
@@ -111,13 +111,60 @@ pub fn run_tunnel(
     let tx_clone = Arc::clone(&tx);
     let key_tx = session_key;
 
+    let tx_for_rep = Arc::clone(&tx);
+    let last_keepalive_recv = Arc::new(AtomicU64::new(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    ));
+
+    let last_kr_tx = Arc::clone(&last_keepalive_recv);
+    let peer_mac_tx = peer_mac;
+    let our_mac_tx = our_mac;
+
     // ── Thread 1: TUN → Ethernet ──────────────────────────────────────────
     let tun_to_eth = thread::spawn(move || {
         let mut buf = vec![0u8; (TUN_MTU + 200) as usize];
         crate::vlog!("tun→eth thread started");
+
+        let mut last_keepalive_sent = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
         loop {
             if stop_tx.load(Ordering::Relaxed) {
+                // Wake up `rx.next()` which is likely deadlocked on Linux AF_PACKET:
+                let dummy = build_eth_frame(&our_mac_tx, &our_mac_tx, &[0u8; 1]);
+                let _ = tx_clone.lock().unwrap().send_to(&dummy, None);
+
                 crate::vlog!("tun→eth: stop signalled, exiting");
+                break;
+            }
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            if now - last_keepalive_sent >= 5 {
+                let frame = build_eth_frame(
+                    &peer_mac_tx,
+                    &our_mac_tx,
+                    &crate::protocol::build_keepalive_req(),
+                );
+                let _ = tx_clone.lock().unwrap().send_to(&frame, None);
+                last_keepalive_sent = now;
+            }
+
+            if now - last_kr_tx.load(Ordering::Relaxed) >= 15 {
+                crate::vlog!("tun→eth: keepalive timeout (15s)! Peer lost.");
+                stop_tx.store(true, Ordering::Relaxed);
+
+                // Wake up `rx.next()` organically to cleanly unwind process
+                let dummy = build_eth_frame(&our_mac_tx, &our_mac_tx, &[0u8; 1]);
+                let _ = tx_clone.lock().unwrap().send_to(&dummy, None);
+
                 break;
             }
 
@@ -190,6 +237,8 @@ pub fn run_tunnel(
     let stop_rx = Arc::clone(&stop);
     let key_rx = session_key;
     let our_mac_rx = our_mac;
+    let peer_mac_rx = peer_mac;
+    let last_kr_rx = Arc::clone(&last_keepalive_recv);
 
     // ── Thread 2: Ethernet → TUN ──────────────────────────────────────────
     let eth_to_tun = thread::spawn(move || {
@@ -251,6 +300,13 @@ pub fn run_tunnel(
 
             match pkt {
                 L2APacket::Tunnel(t) => {
+                    last_kr_rx.store(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                        Ordering::Relaxed,
+                    );
                     crate::vlog!(
                         "eth→tun: received tunnel frame, ciphertext {} bytes",
                         t.ciphertext.len()
@@ -277,6 +333,32 @@ pub fn run_tunnel(
                     crate::vlog!("eth→tun: received Disconnect from peer");
                     stop_rx.store(true, Ordering::Relaxed);
                     break;
+                }
+                L2APacket::KeepaliveReq => {
+                    crate::vlog!("eth→tun: received KeepaliveReq");
+                    last_kr_rx.store(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                        Ordering::Relaxed,
+                    );
+                    let frame = build_eth_frame(
+                        &peer_mac_rx,
+                        &our_mac_rx,
+                        &crate::protocol::build_keepalive_rep(),
+                    );
+                    let _ = tx_for_rep.lock().unwrap().send_to(&frame, None);
+                }
+                L2APacket::KeepaliveRep => {
+                    crate::vlog!("eth→tun: received KeepaliveRep");
+                    last_kr_rx.store(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                        Ordering::Relaxed,
+                    );
                 }
                 other => {
                     crate::vlog!(
