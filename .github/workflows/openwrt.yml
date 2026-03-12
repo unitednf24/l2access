@@ -52,8 +52,11 @@ jobs:
           wget "${BASE_URL}/${SDK_FILE}"
           tar -xf "${SDK_FILE}"
           
+          # Remove the archive so the wildcard only matches the extracted directory
+          rm -f "${SDK_FILE}"
+          
           # Rename extracted folder to exactly 'sdk/'
-          mv openwrt-sdk* sdk
+          mv openwrt-sdk-* sdk
 
       - name: Setup OpenWrt feeds and dependencies
         run: |
