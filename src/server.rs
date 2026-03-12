@@ -12,7 +12,7 @@ use crate::tunnel;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
 
-pub fn run(iface_name: &str, subnet: crate::protocol::Subnet) -> Result<()> {
+pub fn run(iface_name: &str, subnet: crate::protocol::Subnet, stop: Arc<AtomicBool>) -> Result<()> {
     let iface = net::find_interface(iface_name)?;
     let our_mac = net::iface_mac(&iface)?;
 
@@ -32,14 +32,6 @@ pub fn run(iface_name: &str, subnet: crate::protocol::Subnet) -> Result<()> {
     let (raw_tx, raw_rx) = net::open_channel(&iface)?;
     let tx = Arc::new(Mutex::new(raw_tx));
     let rx = Arc::new(Mutex::new(raw_rx));
-    let stop = Arc::new(AtomicBool::new(false));
-
-    {
-        let stop2 = Arc::clone(&stop);
-        let _ = ctrlc::set_handler(move || {
-            stop2.store(true, Ordering::Relaxed);
-        });
-    }
 
     // Discovery broadcast thread
     {

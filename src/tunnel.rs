@@ -24,7 +24,7 @@ pub fn create_tun(
 ) -> Result<tun::platform::Device> {
     let mut config = tun::Configuration::default();
     config
-        .name("l2access")
+        .name("l2access%d")
         .address(local_ip)
         .netmask(netmask)
         .mtu(TUN_MTU as i32)

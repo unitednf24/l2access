@@ -43,7 +43,10 @@ pub fn verify_credentials(username: &str, password: &str) -> Result<()> {
         if password.is_empty() {
             return Ok(());
         } else {
-            bail!("Password was provided (len {}) for an account that expects no password", password.len());
+            bail!(
+                "Password was provided (len {}) for an account that expects no password",
+                password.len()
+            );
         }
     }
 
@@ -56,15 +59,18 @@ pub fn verify_credentials(username: &str, password: &str) -> Result<()> {
     }
 
     let c_password = CString::new(password)?;
-    
+
     // Call crypt to hash the input password with the salt from the system hash
     let crypt_res = unsafe { crypt(c_password.as_ptr(), hash_ptr) };
     if crypt_res.is_null() {
-        bail!("Failed to generate crypt hash from salt length {}", hash_bytes.len());
+        bail!(
+            "Failed to generate crypt hash from salt length {}",
+            hash_bytes.len()
+        );
     }
-    
+
     let computed_hash = unsafe { CStr::from_ptr(crypt_res) };
-    
+
     // Standard string comparison
     if hash_bytes == computed_hash.to_bytes() {
         Ok(())

@@ -29,19 +29,26 @@ pub struct ServerInfo {
     pub subnet_cidr: String,
 }
 
-pub fn run(iface_name: &str, subnet: crate::protocol::Subnet) -> Result<()> {
-    let iface = net::find_interface(iface_name)?;
-    let our_mac = net::iface_mac(&iface)?;
+pub fn run(
+    ifaces: Vec<String>,
+    subnet: crate::protocol::Subnet,
+    stop: Arc<AtomicBool>,
+) -> Result<()> {
+    if ifaces.is_empty() {
+        bail!("No interfaces provided for client");
+    }
 
     // ── Phase 1: TUI discovery + selection ────────────────────────────────
-    // The discovery thread opens its own channel; the main channel is opened
-    // afterwards for auth and tunnel, avoiding any receiver contention.
-    let server = discover_and_select(iface_name, our_mac)?;
+    let (server, iface_name) = discover_and_select(&ifaces)?;
+
+    let iface = net::find_interface(&iface_name)?;
+    let our_mac = net::iface_mac(&iface)?;
 
     println!(
-        "Connecting to {} ({})...",
+        "Connecting to {} ({}) via {}...",
         server.hostname,
-        mac_str(&server.mac)
+        mac_str(&server.mac),
+        iface_name
     );
     if !server.subnet_cidr.is_empty() {
         println!("Server advertises subnet: {}", server.subnet_cidr);
@@ -130,21 +137,6 @@ pub fn run(iface_name: &str, subnet: crate::protocol::Subnet) -> Result<()> {
     }
 
     let stats = Arc::new(Stats::default());
-    let stop = Arc::new(AtomicBool::new(false));
-
-    {
-        let stop2 = Arc::clone(&stop);
-        let tx2 = Arc::clone(&tx);
-        let our_mac2 = our_mac;
-        let peer_mac = server.mac;
-        let _ = ctrlc::set_handler(move || {
-            stop2.store(true, Ordering::Relaxed);
-            let disc = build_disconnect();
-            let frame = build_eth_frame(&peer_mac, &our_mac2, &disc);
-            let _ = tx2.lock().unwrap().send_to(&frame, None);
-        });
-    }
-
     {
         let stats2 = Arc::clone(&stats);
         let stop2 = Arc::clone(&stop);
@@ -155,7 +147,7 @@ pub fn run(iface_name: &str, subnet: crate::protocol::Subnet) -> Result<()> {
 
     tunnel::run_tunnel(
         tun_dev,
-        tx,
+        Arc::clone(&tx),
         rx,
         session_key,
         our_mac,
@@ -164,69 +156,87 @@ pub fn run(iface_name: &str, subnet: crate::protocol::Subnet) -> Result<()> {
         stop,
     );
 
+    let disc = build_disconnect();
+    let frame = build_eth_frame(&server.mac, &our_mac, &disc);
+    let _ = tx.lock().unwrap().send_to(&frame, None);
+
     println!("Disconnected.");
     Ok(())
 }
 
 // ── TUI discovery + selection ─────────────────────────────────────────────────
 
-fn discover_and_select(iface_name: &str, our_mac: [u8; 6]) -> Result<ServerInfo> {
-    let iface = net::find_interface(iface_name)?;
-
-    // The background thread opens its OWN dedicated channel so it has exclusive,
-    // lock-free access to the receiver.  Two AF_PACKET sockets on the same
-    // interface both receive all frames independently.
-    let (_, disc_rx) = net::open_channel_discovery(&iface)?;
-
-    let servers = Arc::new(Mutex::new(Vec::<ServerInfo>::new()));
-    let servers_bg = Arc::clone(&servers);
+fn discover_and_select(iface_names: &[String]) -> Result<(ServerInfo, String)> {
+    let servers = Arc::new(Mutex::new(Vec::<(ServerInfo, String)>::new()));
     let stop_bg = Arc::new(AtomicBool::new(false));
-    let stop_bg2 = Arc::clone(&stop_bg);
 
     // Background thread: owns disc_rx exclusively — no mutex on the receiver.
-    std::thread::spawn(move || {
-        let mut rx = disc_rx;
-        loop {
-            if stop_bg2.load(Ordering::Relaxed) {
-                break;
-            }
-            let raw = match rx.next() {
-                Ok(f) => f.to_vec(),
-                Err(_) => continue, // 1 s timeout or transient error
-            };
-            let (_dst, src_mac, payload) = match parse_eth_frame(&raw) {
-                Some(f) => f,
-                None => continue,
-            };
-            if src_mac == our_mac {
-                continue; // skip our own reflections
-            }
-            if let Some(L2APacket::Discovery(d)) = parse_l2a_payload(payload) {
-                let mut list = servers_bg.lock().unwrap();
-                if let Some(s) = list.iter_mut().find(|s| s.mac == src_mac) {
-                    s.hostname = d.hostname;
-                    s.version = d.version;
-                    s.pubkey = d.server_pubkey;
-                    s.subnet_cidr = d.subnet_cidr;
-                } else {
-                    list.push(ServerInfo {
-                        mac: src_mac,
-                        hostname: d.hostname,
-                        version: d.version,
-                        pubkey: d.server_pubkey,
-                        subnet_cidr: d.subnet_cidr,
-                    });
+    for iface_name in iface_names {
+        let iface = match net::find_interface(iface_name) {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let our_mac = net::iface_mac(&iface).unwrap_or([0; 6]);
+
+        if let Ok((_, disc_rx)) = net::open_channel_discovery(&iface) {
+            let servers_bg = Arc::clone(&servers);
+            let stop_bg2 = Arc::clone(&stop_bg);
+            let iface_clone = iface_name.clone();
+
+            std::thread::spawn(move || {
+                let mut rx = disc_rx;
+                loop {
+                    if stop_bg2.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let raw = match rx.next() {
+                        Ok(f) => f.to_vec(),
+                        Err(_) => continue,
+                    };
+                    let (_dst, src_mac, payload) = match parse_eth_frame(&raw) {
+                        Some(f) => f,
+                        None => continue,
+                    };
+                    if src_mac == our_mac {
+                        continue;
+                    }
+                    if let Some(L2APacket::Discovery(d)) = parse_l2a_payload(payload) {
+                        let mut list = servers_bg.lock().unwrap();
+                        let mut found = false;
+                        for (s, iname) in list.iter_mut() {
+                            if s.mac == src_mac && iname == &iface_clone {
+                                s.hostname = d.hostname.clone();
+                                s.version = d.version.clone();
+                                s.pubkey = d.server_pubkey;
+                                s.subnet_cidr = d.subnet_cidr.clone();
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            list.push((
+                                ServerInfo {
+                                    mac: src_mac,
+                                    hostname: d.hostname,
+                                    version: d.version,
+                                    pubkey: d.server_pubkey,
+                                    subnet_cidr: d.subnet_cidr,
+                                },
+                                iface_clone.clone(),
+                            ));
+                        }
+                    }
                 }
-            }
+            });
         }
-    });
+    }
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
 
     let mut selected = 0usize;
-    let result = tui_loop(&mut stdout, &servers, &mut selected, iface_name);
+    let result = tui_loop(&mut stdout, &servers, &mut selected);
 
     // Always restore terminal before returning
     let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
@@ -238,12 +248,11 @@ fn discover_and_select(iface_name: &str, our_mac: [u8; 6]) -> Result<ServerInfo>
 
 fn tui_loop(
     stdout: &mut Stdout,
-    servers: &Arc<Mutex<Vec<ServerInfo>>>,
+    servers: &Arc<Mutex<Vec<(ServerInfo, String)>>>,
     selected: &mut usize,
-    iface_name: &str,
-) -> Result<ServerInfo> {
+) -> Result<(ServerInfo, String)> {
     loop {
-        render(stdout, servers, *selected, iface_name)?;
+        render(stdout, servers, *selected)?;
 
         // poll with a short timeout so the list refreshes even with no input
         if !poll(Duration::from_millis(200))? {
@@ -299,9 +308,8 @@ fn tui_loop(
 
 fn render(
     stdout: &mut Stdout,
-    servers: &Arc<Mutex<Vec<ServerInfo>>>,
+    servers: &Arc<Mutex<Vec<(ServerInfo, String)>>>,
     selected: usize,
-    iface_name: &str,
 ) -> Result<()> {
     let list = servers.lock().unwrap().clone();
 
@@ -312,13 +320,9 @@ fn render(
         stdout,
         SetAttribute(Attribute::Bold),
         SetForegroundColor(Color::Cyan),
-        Print("  L2Access"),
+        Print("  L2Access  —  discovering across all interfaces...\r\n"),
         ResetColor,
-        Print(format!(
-            "  —  interface: {}  —  discovering...\r\n",
-            iface_name
-        )),
-        Print(format!("  {}\r\n\r\n", "─".repeat(60))),
+        Print(format!("  {}\r\n\r\n", "─".repeat(75))),
     )?;
 
     // ── Server list ────────────────────────────────────────────────────────
@@ -334,50 +338,42 @@ fn render(
             stdout,
             SetAttribute(Attribute::Dim),
             Print(format!(
-                "  {:<3}  {:<22}  {:<19}  {:<18}  {}\r\n",
-                "#", "Hostname", "MAC", "Subnet", "Version"
+                "  {:<3}  {:<10}  {:<20}  {:<19}  {:<16}\r\n",
+                "#", "Interface", "Hostname", "MAC", "Subnet"
             )),
             ResetColor,
         )?;
 
-        for (i, s) in list.iter().enumerate() {
-            if i == selected {
-                queue!(
-                    stdout,
-                    SetForegroundColor(Color::Black),
-                    crossterm::style::SetBackgroundColor(Color::Cyan),
-                    Print(format!(
-                        "  {:>2}  {:<22}  {:<19}  {:<18}  {}\r\n",
-                        i + 1,
-                        s.hostname,
-                        mac_str(&s.mac),
-                        s.subnet_cidr,
-                        s.version
-                    )),
-                    ResetColor,
-                )?;
+        for (i, (s, iname)) in list.iter().enumerate() {
+            let color = if i == selected {
+                Color::Black
             } else {
-                queue!(
-                    stdout,
-                    SetForegroundColor(Color::White),
-                    Print(format!(
-                        "  {:>2}  {:<22}  {:<19}  {:<18}  {}\r\n",
-                        i + 1,
-                        s.hostname,
-                        mac_str(&s.mac),
-                        s.subnet_cidr,
-                        s.version
-                    )),
-                    ResetColor,
-                )?;
+                Color::White
+            };
+
+            if i == selected {
+                queue!(stdout, crossterm::style::SetBackgroundColor(Color::Cyan))?;
             }
+            queue!(
+                stdout,
+                SetForegroundColor(color),
+                Print(format!(
+                    "  {:>2}  {:<10}  {:<20}  {:<19}  {:<16}\r\n",
+                    i + 1,
+                    iname,
+                    s.hostname,
+                    mac_str(&s.mac),
+                    s.subnet_cidr,
+                )),
+                ResetColor,
+            )?;
         }
     }
 
     // ── Footer ─────────────────────────────────────────────────────────────
     queue!(
         stdout,
-        Print(format!("\r\n  {}\r\n", "─".repeat(60))),
+        Print(format!("\r\n  {}\r\n", "─".repeat(75))),
         SetAttribute(Attribute::Dim),
         Print("  ↑/↓ navigate    Enter select    q quit\r\n"),
         ResetColor,

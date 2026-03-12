@@ -40,9 +40,13 @@ struct Cli {
 enum Command {
     /// Run as server: broadcast discovery and accept connections
     Server {
-        /// Network interface to use (e.g. eth0)
+        /// Network interface(s) to use (comma-separated). If omitted, binds to all active interfaces.
         #[arg(short, long)]
-        iface: String,
+        iface: Option<String>,
+
+        /// Network interface(s) to exclude if binding to all interfaces.
+        #[arg(short = 'x', long, value_delimiter = ',')]
+        exclude_iface: Option<Vec<String>>,
 
         /// Subnet for tunnel IPs in CIDR notation (default: 169.254.0.0/16).
         /// Must match the value used on the client side.
@@ -51,9 +55,13 @@ enum Command {
     },
     /// Run as client: discover servers and connect
     Client {
-        /// Network interface to use (e.g. eth0)
+        /// Network interface(s) to use (comma-separated). If omitted, binds to all active interfaces.
         #[arg(short, long)]
-        iface: String,
+        iface: Option<String>,
+
+        /// Network interface(s) to exclude if binding to all interfaces.
+        #[arg(short = 'x', long, value_delimiter = ',')]
+        exclude_iface: Option<Vec<String>>,
 
         /// Subnet for tunnel IPs in CIDR notation (default: 169.254.0.0/16).
         /// Must match the value used on the server side.
@@ -69,14 +77,92 @@ fn main() -> Result<()> {
         VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    match cli.command {
-        Command::Server { iface, subnet } => {
-            let subnet = Subnet::parse(&subnet)?;
-            server::run(&iface, subnet)
-        }
-        Command::Client { iface, subnet } => {
-            let subnet = Subnet::parse(&subnet)?;
-            client::run(&iface, subnet)
+    let (iface_str, exclude_list, subnet_str, is_server) = match &cli.command {
+        Command::Server {
+            iface,
+            exclude_iface,
+            subnet,
+        } => (
+            iface.clone(),
+            exclude_iface.clone().unwrap_or_default(),
+            subnet.clone(),
+            true,
+        ),
+        Command::Client {
+            iface,
+            exclude_iface,
+            subnet,
+        } => (
+            iface.clone(),
+            exclude_iface.clone().unwrap_or_default(),
+            subnet.clone(),
+            false,
+        ),
+    };
+
+    let subnet = Subnet::parse(&subnet_str)?;
+
+    let mut bind_ifaces = Vec::new();
+    if let Some(ifaces_raw) = iface_str {
+        bind_ifaces.extend(ifaces_raw.split(',').map(|s| s.trim().to_string()));
+    } else {
+        // Collect all active, non-loopback interfaces dynamically
+        let all = pnet::datalink::interfaces();
+        for i in all {
+            if i.is_up() && !i.is_loopback() && !exclude_list.contains(&i.name) {
+                bind_ifaces.push(i.name.clone());
+            }
         }
     }
+
+    if bind_ifaces.is_empty() {
+        eprintln!("No valid network interfaces found to bind.");
+        std::process::exit(1);
+    }
+
+    println!("Binding to interfaces: {:?}", bind_ifaces);
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_clone = std::sync::Arc::clone(&stop);
+    let _ = ctrlc::set_handler(move || {
+        // If the user mashes Ctrl+C repeatedly, exit instantaneously.
+        if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            std::process::exit(1);
+        }
+
+        println!("\nInitiating graceful shutdown across all interfaces... (Ctrl+C again to force)");
+        stop_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // On some architectures, AF_PACKET natively ignores SO_RCVTIMEO and deadlocks.
+        // We spin off a background thread to forcefully kill the application if threads fail to yield organically.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            std::process::exit(0);
+        });
+    });
+
+    if is_server {
+        let mut handles = Vec::new();
+        for iface in bind_ifaces {
+            let subnet_clone = subnet.clone();
+            let stop_thread = std::sync::Arc::clone(&stop);
+            handles.push(std::thread::spawn(move || {
+                if let Err(e) = server::run(&iface, subnet_clone, stop_thread) {
+                    eprintln!("[{}] Server error: {}", iface, e);
+                }
+            }));
+        }
+
+        // Wait for all interfaces to exit securely
+        for h in handles {
+            let _ = h.join();
+        }
+    } else {
+        // Client uses a single UI loop internally handling all its requested interfaces seamlessly natively
+        if let Err(e) = client::run(bind_ifaces, subnet, stop) {
+            eprintln!("Client error: {}", e);
+        }
+    }
+
+    Ok(())
 }
