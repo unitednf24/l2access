@@ -14,8 +14,41 @@ start_service() {
 	if [ "$enabled" -eq 1 ]; then
 		local mode iface subnet
 		config_get mode main mode "server"
-		config_get iface main iface "eth0"
+		config_get iface main iface "br-lan"
 		config_get subnet main subnet "169.254.0.0/16"
+
+		# Register network interface automatically if missing
+		if ! uci -q get network.l2access > /dev/null; then
+			uci set network.l2access=interface
+			uci set network.l2access.proto='none'
+			uci set network.l2access.device='l2access'
+			uci set network.l2access.auto='0'
+			uci set network.l2access.defaultroute='0'
+			uci commit network
+			/etc/init.d/network reload
+		fi
+
+		# Register firewall zone automatically if missing
+		if ! uci -q get firewall.@zone[-1].name | grep -q 'l2access'; then
+			# Verify it doesn't exist anywhere in the array
+			local zone_exists=0
+			config_load firewall
+			config_foreach check_zone zone l2access
+			
+			if [ "$?" -ne 1 ]; then
+				uci add firewall zone
+				uci set firewall.@zone[-1].name='l2access'
+				uci set firewall.@zone[-1].input='ACCEPT'
+				uci set firewall.@zone[-1].output='ACCEPT'
+				uci set firewall.@zone[-1].forward='REJECT'
+				uci add_list firewall.@zone[-1].network='l2access'
+				uci commit firewall
+				/etc/init.d/firewall reload
+			fi
+		fi
+
+		# Reload l2access config (overwritten by firewall check)
+		config_load l2access
 
 		procd_open_instance
 		procd_set_param command "$PROG" "$mode"
@@ -33,6 +66,17 @@ start_service() {
 		procd_set_param stderr 1
 		procd_close_instance
 	fi
+}
+
+check_zone() {
+	local cfg="$1"
+	local target_name="$2"
+	local name
+	config_get name "$cfg" name
+	if [ "$name" = "$target_name" ]; then
+		return 1
+	fi
+	return 0
 }
 
 service_triggers() {
