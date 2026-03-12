@@ -44,16 +44,14 @@ jobs:
           SIZE=$(du -bs ipk_build/data/usr/bin/l2access | cut -f1)
 
           # Generate the control file mimicking rust-package.mk output
-          cat <<EOF > ipk_build/control/control
-Package: l2access
-Version: 0.1.0-1
-Depends: libc, libip4tc, libip6tc, ip-full
-License: MIT
-Section: net
-Architecture: aarch64_generic
-Installed-Size: $SIZE
-Description: Secure, zero-configuration L2-tunnelled IP connectivity over local networks.
-EOF
+          echo "Package: l2access" > ipk_build/control/control
+          echo "Version: 0.1.0-1" >> ipk_build/control/control
+          echo "Depends: libc, libip4tc, libip6tc, ip-full" >> ipk_build/control/control
+          echo "License: MIT" >> ipk_build/control/control
+          echo "Section: net" >> ipk_build/control/control
+          echo "Architecture: aarch64_generic" >> ipk_build/control/control
+          echo "Installed-Size: $SIZE" >> ipk_build/control/control
+          echo "Description: Secure, zero-configuration L2-tunnelled IP connectivity over local networks." >> ipk_build/control/control
 
           cd ipk_build
           # IMPORTANT: opkg expects debian-binary to say "2.0"
