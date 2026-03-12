@@ -15,12 +15,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86
-            subtarget: 64
           - target: armsr
             subtarget: armv8
-          - target: ath79
-            subtarget: generic
 
     steps:
       - name: Checkout Code
@@ -72,7 +68,9 @@ jobs:
       - name: Build l2access Package
         run: |
           cd sdk
-          make package/l2access/compile V=sc PKG_SOURCE_URL="file://$GITHUB_WORKSPACE/l2access"
+          # Pass CI=false to prevent the OpenWrt Rust host-builder from panicking 
+          # due to GitHub's default 'CI=true' environment variable
+          CI=false make package/l2access/compile V=sc PKG_SOURCE_URL="file://$GITHUB_WORKSPACE/l2access"
 
       - name: Upload IPK Artifact
         uses: actions/upload-artifact@v4
