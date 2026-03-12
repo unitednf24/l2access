@@ -7,6 +7,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build_openwrt:
     name: Build OpenWrt IPK
@@ -49,7 +52,7 @@ jobs:
           echo "Depends: libc, libip4tc, libip6tc, ip-full" >> ipk_build/control/control
           echo "License: MIT" >> ipk_build/control/control
           echo "Section: net" >> ipk_build/control/control
-          echo "Architecture: aarch64_generic" >> ipk_build/control/control
+          echo "Architecture: aarch64_cortex-a53" >> ipk_build/control/control
           echo "Installed-Size: $SIZE" >> ipk_build/control/control
           echo "Description: Secure, zero-configuration L2-tunnelled IP connectivity over local networks." >> ipk_build/control/control
 
@@ -62,11 +65,11 @@ jobs:
           tar --owner=root --group=root -C control -czvf control.tar.gz .
 
           # Construct the final .ipk (must preserve order: debian-binary, control, data)
-          tar --owner=root --group=root -czvf l2access_0.1.0-1_aarch64_generic.ipk ./debian-binary ./control.tar.gz ./data.tar.gz
+          tar --owner=root --group=root -czvf l2access_0.1.0-1_aarch64_cortex-a53.ipk ./debian-binary ./control.tar.gz ./data.tar.gz
           echo "IPK package generated successfully."
           
       - name: Upload IPK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: l2access-openwrt-aarch64
-          path: ipk_build/l2access_0.1.0-1_aarch64_generic.ipk
+          path: ipk_build/l2access_0.1.0-1_aarch64_cortex-a53.ipk
