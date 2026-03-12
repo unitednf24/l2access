@@ -32,7 +32,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libncurses5-dev gawk git subversion libssl-dev gettext \
-            zlib1g-dev swig unzip time python3-distutils file wget rsync curl qemu-utils
+            zlib1g-dev swig unzip time python3-setuptools file wget rsync curl qemu-utils
 
       - name: Download OpenWrt SDK
         env:
