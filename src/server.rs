@@ -33,7 +33,7 @@ pub fn run(
         for i in explicit { initial_binds.push(i.clone()); }
     } else {
         for i in pnet::datalink::interfaces() {
-            if i.is_up() && !i.is_loopback() && !exclude_list.contains(&i.name) {
+            if i.is_up() && !i.is_loopback() && !exclude_list.contains(&i.name) && !is_slave(&i.name) {
                 initial_binds.push(i.name.clone());
             }
         }
@@ -262,11 +262,10 @@ pub fn run(
                             let peers_map = peers_eth.read().unwrap();
                             if let Some(peer) = peers_map.get(&peer_ip) {
                                 peer.last_kr_rx.store(now, Ordering::Relaxed);
-                                match crypto::decrypt(&peer.session_key, &t.nonce, &t.ciphertext) {
-                                    Ok(dec) => Some(dec),
-                                    Err(_) => None,
-                                }
-                            } else { None }
+                                crypto::decrypt(&peer.session_key, &t.nonce, &t.ciphertext).ok()
+                            } else {
+                                None
+                            }
                         };
 
                         if let Some(dec) = valid_decrypted {
@@ -300,7 +299,7 @@ pub fn run(
         active_ifaces.lock().unwrap().insert(i.clone());
         spawn_interface_listener(
             i, 
-            subnet.clone(), 
+            subnet,
             Arc::clone(&server_secret), 
             server_pubkey, 
             hostname_str.clone(), 
@@ -313,14 +312,14 @@ pub fn run(
         loop {
             if stop.load(Ordering::Relaxed) { break; }
             for i in pnet::datalink::interfaces() {
-                if i.is_up() && !i.is_loopback() && !exclude_list.contains(&i.name) {
+                if i.is_up() && !i.is_loopback() && !exclude_list.contains(&i.name) && !is_slave(&i.name) {
                     let mut ai = active_ifaces.lock().unwrap();
                     if !ai.contains(&i.name) {
                         println!("[Hot-Plug] Discovered new active physical interface natively: {}", i.name);
                         ai.insert(i.name.clone());
                         spawn_interface_listener(
                             i.name.clone(), 
-                            subnet.clone(), 
+                            subnet,
                             Arc::clone(&server_secret), 
                             server_pubkey, 
                             hostname_str.clone(), 
@@ -374,4 +373,8 @@ fn print_routes(tun_ip: std::net::Ipv4Addr) {
     if let Ok(out) = std::process::Command::new("ip").args(["addr", "show"]).output() {
         crate::vlog!("interfaces:\n{}", String::from_utf8_lossy(&out.stdout).trim_end());
     }
+}
+
+fn is_slave(iface_name: &str) -> bool {
+    std::path::Path::new(&format!("/sys/class/net/{}/master", iface_name)).exists()
 }

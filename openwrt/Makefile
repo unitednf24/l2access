@@ -39,5 +39,15 @@ define Package/l2access/install
 	$(INSTALL_BIN) ./files/l2access.init $(1)/etc/init.d/l2access
 endef
 
+define Package/l2access/prerm
+#!/bin/sh
+if [ -x /etc/init.d/l2access ]; then
+	/etc/init.d/l2access stop || true
+	/etc/init.d/l2access cleanup || true
+	/etc/init.d/l2access disable || true
+fi
+exit 0
+endef
+
 # Let the rust-package.mk module handle the Cargo build wrapper
 $(eval $(call BuildPackage,l2access))

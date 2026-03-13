@@ -133,7 +133,7 @@ fn main() -> Result<()> {
         } else {
             let all = pnet::datalink::interfaces();
             for i in all {
-                if i.is_up() && !i.is_loopback() && !exclude_list.contains(&i.name) {
+                if i.is_up() && !i.is_loopback() && !exclude_list.contains(&i.name) && !is_slave(&i.name) {
                     bind_ifaces.push(i.name.clone());
                 }
             }
@@ -152,4 +152,8 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn is_slave(iface_name: &str) -> bool {
+    std::path::Path::new(&format!("/sys/class/net/{}/master", iface_name)).exists()
 }

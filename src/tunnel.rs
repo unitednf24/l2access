@@ -120,8 +120,6 @@ pub fn run_tunnel(
     ));
 
     let last_kr_tx = Arc::clone(&last_keepalive_recv);
-    let peer_mac_tx = peer_mac;
-    let our_mac_tx = our_mac;
 
     // ── Thread 1: TUN → Ethernet ──────────────────────────────────────────
     let tun_to_eth = thread::spawn(move || {
@@ -136,7 +134,7 @@ pub fn run_tunnel(
         loop {
             if stop_tx.load(Ordering::Relaxed) {
                 // Wake up `rx.next()` which is likely deadlocked on Linux AF_PACKET:
-                let dummy = build_eth_frame(&our_mac_tx, &our_mac_tx, &[0u8; 1]);
+                let dummy = build_eth_frame(&our_mac, &our_mac, &[0u8; 1]);
                 let _ = tx_clone.lock().unwrap().send_to(&dummy, None);
 
                 crate::vlog!("tun→eth: stop signalled, exiting");
@@ -149,8 +147,8 @@ pub fn run_tunnel(
                 .as_secs();
             if now - last_keepalive_sent >= 5 {
                 let frame = build_eth_frame(
-                    &peer_mac_tx,
-                    &our_mac_tx,
+                    &peer_mac,
+                    &our_mac,
                     &crate::protocol::build_keepalive_req(),
                 );
                 let _ = tx_clone.lock().unwrap().send_to(&frame, None);
@@ -162,7 +160,7 @@ pub fn run_tunnel(
                 stop_tx.store(true, Ordering::Relaxed);
 
                 // Wake up `rx.next()` organically to cleanly unwind process
-                let dummy = build_eth_frame(&our_mac_tx, &our_mac_tx, &[0u8; 1]);
+                let dummy = build_eth_frame(&our_mac, &our_mac, &[0u8; 1]);
                 let _ = tx_clone.lock().unwrap().send_to(&dummy, None);
 
                 break;

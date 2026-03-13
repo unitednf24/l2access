@@ -250,9 +250,11 @@ fn discover_and_select(iface_names: &[String]) -> Result<(ServerInfo, String)> {
     result
 }
 
+type ServerList = Arc<Mutex<Vec<(ServerInfo, String, std::time::Instant)>>>;
+
 fn tui_loop(
     stdout: &mut Stdout,
-    servers: &Arc<Mutex<Vec<(ServerInfo, String, std::time::Instant)>>>,
+    servers: &ServerList,
     selected: &mut usize,
 ) -> Result<(ServerInfo, String)> {
     loop {
@@ -263,10 +265,8 @@ fn tui_loop(
             list.retain(|(_, _, last_seen)| {
                 now.duration_since(*last_seen) < Duration::from_secs(16)
             });
-            if list.len() < len_before {
-                if *selected >= list.len() {
-                    *selected = list.len().saturating_sub(1);
-                }
+            if list.len() < len_before && *selected >= list.len() {
+                *selected = list.len().saturating_sub(1);
             }
         }
 
@@ -327,7 +327,7 @@ fn tui_loop(
 
 fn render(
     stdout: &mut Stdout,
-    servers: &Arc<Mutex<Vec<(ServerInfo, String, std::time::Instant)>>>,
+    servers: &ServerList,
     selected: usize,
 ) -> Result<()> {
     let list = servers.lock().unwrap().clone();

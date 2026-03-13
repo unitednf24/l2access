@@ -1,10 +1,15 @@
 use anyhow::{bail, Result};
 use std::ffi::{CStr, CString};
+use std::sync::Mutex;
 
 #[link(name = "crypt")]
 extern "C" {
     fn crypt(key: *const libc::c_char, salt: *const libc::c_char) -> *mut libc::c_char;
 }
+
+// getspnam, getpwnam, and crypt all use process-global static buffers.
+// Serialise all auth checks to prevent concurrent calls from corrupting each other.
+static AUTH_LOCK: Mutex<()> = Mutex::new(());
 
 /// Verify credentials using native Linux passwd/shadow resolution.
 /// Exactly mimics OpenWrt/LuCI and standard PAM shadow fallbacks.
@@ -13,69 +18,77 @@ pub fn verify_credentials(username: &str, password: &str) -> Result<()> {
         bail!("Empty username");
     }
 
+    // Hold the lock for the entire function: getspnam, getpwnam, and crypt are
+    // not thread-safe (static internal buffers); concurrent callers must be serialised.
+    let _guard = AUTH_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("auth lock poisoned"))?;
+
     let c_username = CString::new(username)?;
-    let mut hash_ptr: *const libc::c_char = std::ptr::null();
+    let mut hash_bytes: Vec<u8> = Vec::new();
+    let mut found = false;
 
     unsafe {
-        // LuCI standard: try getspnam first
+        // LuCI standard: try getspnam first (requires root for /etc/shadow)
         let spwd = libc::getspnam(c_username.as_ptr());
         if !spwd.is_null() {
-            hash_ptr = (*spwd).sp_pwdp;
+            found = true;
+            // Copy immediately — the pointer is into a static buffer that the
+            // next getspnam/crypt call may overwrite.
+            hash_bytes = CStr::from_ptr((*spwd).sp_pwdp).to_bytes().to_vec();
         } else {
-            // fallback to getpwnam
+            // Fallback to getpwnam (world-readable, but only carries 'x' on
+            // shadow-enabled systems)
             let pw = libc::getpwnam(c_username.as_ptr());
             if !pw.is_null() {
-                hash_ptr = (*pw).pw_passwd;
+                found = true;
+                hash_bytes = CStr::from_ptr((*pw).pw_passwd).to_bytes().to_vec();
             }
         }
     }
 
-    if hash_ptr.is_null() {
+    if !found {
         bail!("User not found or access denied (run as root)");
     }
 
-    let hash_cstr = unsafe { CStr::from_ptr(hash_ptr) };
-    let hash_bytes = hash_cstr.to_bytes();
-
-    // If the retrieved hash is completely empty, it means "no password required".
-    // This happens frequently on OpenWrt for the default 'root' user.
+    // Empty hash → account has no password set (common on OpenWrt root).
     if hash_bytes.is_empty() {
-        if password.is_empty() {
-            return Ok(());
+        return if password.is_empty() {
+            Ok(())
         } else {
             bail!(
                 "Password was provided (len {}) for an account that expects no password",
                 password.len()
-            );
-        }
+            )
+        };
     }
 
-    // Passwords starting with '!' or '*' are locked accounts in /etc/shadow or /etc/passwd.
+    // 'x' means the real hash is in /etc/shadow but getspnam failed (not root).
     if hash_bytes == b"x" {
-        bail!("Account restricted: hash is 'x' (Shadow lookup failed. Are you running the server as root?)");
+        bail!("Account restricted: shadow hash inaccessible (run server as root)");
     }
+    // '!' or '*' → account locked.
     if hash_bytes.starts_with(b"!") || hash_bytes.starts_with(b"*") {
-        bail!("Account locked in /etc/shadow or /etc/passwd (hash restricted)");
+        bail!("Account locked in /etc/shadow or /etc/passwd");
     }
 
     let c_password = CString::new(password)?;
+    // Build a NUL-terminated copy of the hash to use as the crypt salt.
+    // hash_bytes was already copied above, so this doesn't alias the getspnam buffer.
+    let c_hash = CString::new(hash_bytes.clone())
+        .map_err(|_| anyhow::anyhow!("stored hash contains an unexpected NUL byte"))?;
 
-    // Call crypt to hash the input password with the salt from the system hash
-    let crypt_res = unsafe { crypt(c_password.as_ptr(), hash_ptr) };
+    let crypt_res = unsafe { crypt(c_password.as_ptr(), c_hash.as_ptr()) };
     if crypt_res.is_null() {
-        bail!(
-            "Failed to generate crypt hash from salt length {}",
-            hash_bytes.len()
-        );
+        bail!("crypt() returned NULL (unsupported hash scheme?)");
     }
 
-    let computed_hash = unsafe { CStr::from_ptr(crypt_res) };
+    let computed = unsafe { CStr::from_ptr(crypt_res).to_bytes() };
 
-    // Standard string comparison
-    if hash_bytes == computed_hash.to_bytes() {
+    if hash_bytes.as_slice() == computed {
         Ok(())
     } else {
-        bail!("Invalid credentials (password crypt hash mismatch)");
+        bail!("Invalid credentials")
     }
 }
 

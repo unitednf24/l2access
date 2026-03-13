@@ -63,7 +63,13 @@ pub fn display_loop(
             elapsed
         );
         let _ = std::io::stdout().flush();
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        // Check stop every 100 ms so shutdown is responsive.
+        for _ in 0..10 {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
     println!();
 }

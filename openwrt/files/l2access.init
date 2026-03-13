@@ -4,7 +4,43 @@ USE_PROCD=1
 START=99
 STOP=15
 
+EXTRA_COMMANDS="cleanup"
+
 PROG=/usr/bin/l2access
+
+remove_uci_config() {
+	local changed=0
+	
+	if uci -q get network.l2access > /dev/null; then
+		uci delete network.l2access
+		changed=1
+		/etc/init.d/network reload
+	fi
+	
+	local zone_idx=""
+	local i=0
+	while uci -q get firewall.@zone[$i].name >/dev/null; do
+		if [ "$(uci -q get firewall.@zone[$i].name)" = "l2access" ]; then
+			zone_idx=$i
+			break
+		fi
+		i=$((i + 1))
+	done
+	
+	if [ -n "$zone_idx" ]; then
+		uci delete firewall.@zone[$zone_idx]
+		changed=1
+		/etc/init.d/firewall reload
+	fi
+	
+	if [ "$changed" -eq 1 ]; then
+		uci commit
+	fi
+}
+
+cleanup() {
+	remove_uci_config
+}
 
 start_service() {
 	local enabled
@@ -14,7 +50,7 @@ start_service() {
 	if [ "$enabled" -eq 1 ]; then
 		local mode iface subnet
 		config_get mode main mode "server"
-		config_get iface main iface "br-lan"
+		config_get iface main iface ""
 		config_get subnet main subnet "169.254.0.0/16"
 
 
@@ -78,6 +114,8 @@ start_service() {
 		procd_set_param stdout 1
 		procd_set_param stderr 1
 		procd_close_instance
+	else
+		remove_uci_config
 	fi
 }
 
