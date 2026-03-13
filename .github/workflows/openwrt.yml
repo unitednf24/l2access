@@ -1,27 +1,198 @@
-name: OpenWrt Build
+name: Build and Release
 
 on:
   push:
     tags:
       - 'v*'
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  BINARY_NAME: l2access
+
+# ─────────────────────────────────────────────────────────────
+# Shared target matrix used by both `build` and `package` jobs.
+# Each entry defines a Rust cross-compile target and the
+# corresponding architecture names for every package format.
+# ─────────────────────────────────────────────────────────────
+# rust-target          → cross-rs target triple
+# deb-arch             → Debian/Ubuntu architecture name
+# rpm-arch             → RPM architecture name
+# openwrt-arch         → OpenWrt ipkg architecture name
 
 jobs:
+  # ── Stage 1: Compile ──────────────────────────────────────────────────────
   build:
+    name: Build (${{ matrix.rust-target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rust-target: x86_64-unknown-linux-musl
+            deb-arch: amd64
+            rpm-arch: x86_64
+            openwrt-arch: x86_64
+          - rust-target: aarch64-unknown-linux-musl
+            deb-arch: arm64
+            rpm-arch: aarch64
+            openwrt-arch: aarch64_cortex-a53
+          - rust-target: armv7-unknown-linux-musleabihf
+            deb-arch: armhf
+            rpm-arch: armv7hl
+            openwrt-arch: arm_cortex-a7_neon-vfpv4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build static binary
+        run: cross build --release --target ${{ matrix.rust-target }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.rust-target }}
+          path: target/${{ matrix.rust-target }}/release/${{ env.BINARY_NAME }}
+          if-no-files-found: error
+
+  # ── Stage 2: Package ──────────────────────────────────────────────────────
+  package:
+    name: Package (${{ matrix.rust-target }})
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rust-target: x86_64-unknown-linux-musl
+            deb-arch: amd64
+            rpm-arch: x86_64
+            openwrt-arch: x86_64
+          - rust-target: aarch64-unknown-linux-musl
+            deb-arch: arm64
+            rpm-arch: aarch64
+            openwrt-arch: aarch64_cortex-a53
+          - rust-target: armv7-unknown-linux-musleabihf
+            deb-arch: armhf
+            rpm-arch: armv7hl
+            openwrt-arch: arm_cortex-a7_neon-vfpv4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download compiled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-${{ matrix.rust-target }}
+          path: dist/
+
+      - name: Read version and set permissions
+        run: |
+          chmod 755 dist/${{ env.BINARY_NAME }}
+          VERSION=$(grep '^version =' Cargo.toml | cut -d '"' -f2)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Install packaging tools (fpm + rpm support)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y rpm ruby ruby-dev
+          sudo gem install fpm --no-document
+
+      # ── .tar.gz — static binary archive ───────────────────────────────────
+      - name: Package → .tar.gz
+        run: |
+          mkdir -p release
+          tar -czf release/${{ env.BINARY_NAME }}-${{ env.VERSION }}-${{ matrix.rust-target }}.tar.gz \
+            -C dist ${{ env.BINARY_NAME }}
+
+      # ── .deb ──────────────────────────────────────────────────────────────
+      - name: Package → .deb
+        run: |
+          fpm -s dir -t deb \
+            --name        ${{ env.BINARY_NAME }} \
+            --version     ${{ env.VERSION }} \
+            --architecture ${{ matrix.deb-arch }} \
+            --description "Secure, zero-configuration L2-tunnelled IP connectivity over local networks" \
+            --license     MIT \
+            --url         "https://github.com/${{ github.repository }}" \
+            --depends     libcap2 \
+            --package     release/${{ env.BINARY_NAME }}_${{ env.VERSION }}_${{ matrix.deb-arch }}.deb \
+            dist/${{ env.BINARY_NAME }}=/usr/bin/${{ env.BINARY_NAME }}
+
+      # ── .rpm ──────────────────────────────────────────────────────────────
+      - name: Package → .rpm
+        run: |
+          fpm -s dir -t rpm \
+            --name        ${{ env.BINARY_NAME }} \
+            --version     ${{ env.VERSION }} \
+            --architecture ${{ matrix.rpm-arch }} \
+            --description "Secure, zero-configuration L2-tunnelled IP connectivity over local networks" \
+            --license     MIT \
+            --url         "https://github.com/${{ github.repository }}" \
+            --package     release/${{ env.BINARY_NAME }}-${{ env.VERSION }}-1.${{ matrix.rpm-arch }}.rpm \
+            dist/${{ env.BINARY_NAME }}=/usr/bin/${{ env.BINARY_NAME }}
+
+      # ── .ipk — OpenWrt ────────────────────────────────────────────────────
+      - name: Package → .ipk (OpenWrt)
+        run: |
+          mkdir -p ipk/data/usr/bin ipk/data/etc/config ipk/data/etc/init.d ipk/control
+
+          cp dist/${{ env.BINARY_NAME }}          ipk/data/usr/bin/
+          cp openwrt/files/l2access.config       ipk/data/etc/config/l2access
+          cp openwrt/files/l2access.init         ipk/data/etc/init.d/l2access
+
+          chmod 755 ipk/data/usr/bin/${{ env.BINARY_NAME }}
+          chmod 755 ipk/data/etc/init.d/l2access
+          chmod 644 ipk/data/etc/config/l2access
+
+          SIZE=$(du -bs ipk/data/usr/bin/${{ env.BINARY_NAME }} | cut -f1)
+
+          echo "Package: ${{ env.BINARY_NAME }}"                                                          > ipk/control/control
+          echo "Version: ${{ env.VERSION }}-1"                                                           >> ipk/control/control
+          echo "Architecture: ${{ matrix.openwrt-arch }}"                                                >> ipk/control/control
+          echo "Depends: libc, libip4tc, libip6tc, ip-full"                                              >> ipk/control/control
+          echo "License: MIT"                                                                             >> ipk/control/control
+          echo "Section: net"                                                                             >> ipk/control/control
+          echo "Installed-Size: $SIZE"                                                                   >> ipk/control/control
+          echo "Description: Secure, zero-configuration L2-tunnelled IP connectivity over local networks." >> ipk/control/control
+
+          echo "2.0" > ipk/debian-binary
+          tar --owner=root --group=root -C ipk/data    -czf ipk/data.tar.gz    .
+          tar --owner=root --group=root -C ipk/control -czf ipk/control.tar.gz .
+          tar --owner=root --group=root \
+            -czf release/${{ env.BINARY_NAME }}_${{ env.VERSION }}-1_${{ matrix.openwrt-arch }}.ipk \
+            -C ipk ./debian-binary ./control.tar.gz ./data.tar.gz
+
+      - name: Upload packages artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.rust-target }}
+          path: release/
+          if-no-files-found: error
+
+  # ── Stage 3: Release ──────────────────────────────────────────────────────
+  release:
     name: Create Release
     runs-on: ubuntu-latest
+    needs: package
     if: startsWith(github.ref, 'refs/tags/')
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+
+      - name: Download all packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          path: release/
+          merge-multiple: true
+
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -37,78 +208,10 @@ jobs:
           draft: false
           prerelease: false
 
-  build_openwrt:
-    name: Build OpenWrt IPK (${{ matrix.openwrt-arch }})
-    runs-on: ubuntu-latest
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - rust-target: aarch64-unknown-linux-musl
-            openwrt-arch: aarch64_cortex-a53
-          - rust-target: x86_64-unknown-linux-musl
-            openwrt-arch: x86_64
-          - rust-target: armv7-unknown-linux-musleabihf
-            openwrt-arch: arm_cortex-a7_neon-vfpv4
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build binary with cross
-        run: cross build --release --target ${{ matrix.rust-target }}
-
-      - name: Collect dependencies and prepare IPK
-        id: pkg
+      - name: Upload all assets to release
         run: |
-          mkdir -p ipk_build/data/usr/bin
-          mkdir -p ipk_build/data/etc/config
-          mkdir -p ipk_build/data/etc/init.d
-          mkdir -p ipk_build/control
-
-          cp target/${{ matrix.rust-target }}/release/l2access ipk_build/data/usr/bin/
-          cp openwrt/files/l2access.config ipk_build/data/etc/config/l2access
-          cp openwrt/files/l2access.init ipk_build/data/etc/init.d/l2access
-
-          chmod 755 ipk_build/data/usr/bin/l2access
-          chmod 755 ipk_build/data/etc/init.d/l2access
-          chmod 644 ipk_build/data/etc/config/l2access
-
-          SIZE=$(du -bs ipk_build/data/usr/bin/l2access | cut -f1)
-          VERSION=$(grep '^version =' Cargo.toml | cut -d '"' -f 2 || echo "0.1.0")
-
-          echo "Package: l2access" > ipk_build/control/control
-          echo "Version: ${VERSION}-1" >> ipk_build/control/control
-          echo "Depends: libc, libip4tc, libip6tc, ip-full" >> ipk_build/control/control
-          echo "License: MIT" >> ipk_build/control/control
-          echo "Section: net" >> ipk_build/control/control
-          echo "Architecture: ${{ matrix.openwrt-arch }}" >> ipk_build/control/control
-          echo "Installed-Size: $SIZE" >> ipk_build/control/control
-          echo "Description: Secure, zero-configuration L2-tunnelled IP connectivity over local networks." >> ipk_build/control/control
-
-          cd ipk_build
-          echo "2.0" > debian-binary
-
-          tar --owner=root --group=root -C data -czvf data.tar.gz .
-          tar --owner=root --group=root -C control -czvf control.tar.gz .
-
-          IPK_FILENAME="l2access_${VERSION}-1_${{ matrix.openwrt-arch }}.ipk"
-          tar --owner=root --group=root -czvf $IPK_FILENAME ./debian-binary ./control.tar.gz ./data.tar.gz
-
-          echo "IPK deployment packaged generated."
-          mv $IPK_FILENAME ../
-          echo "ipk_filename=$IPK_FILENAME" >> $GITHUB_OUTPUT
-
-      - name: Upload IPK to Release
-        uses: actions/upload-release-asset@v1
+          for file in release/*; do
+            gh release upload "${{ github.ref_name }}" "$file" --clobber
+          done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.build.outputs.upload_url }}
-          asset_path: ${{ steps.pkg.outputs.ipk_filename }}
-          asset_name: ${{ steps.pkg.outputs.ipk_filename }}
-          asset_content_type: application/gzip
